@@ -1,0 +1,10 @@
+[package]
+name = "catcache"
+version = "0.1.0"
+authors = ["Michael Mokrysz <hi@46b.it>"]
+
+[dependencies]
+ansi_term = "*"
+rustc-serialize = "*"
+hyper = "0.9.10"
+regex = "0.1"
