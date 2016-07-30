@@ -10,7 +10,7 @@ use std::io::*;
 use regex::Regex;
 //use std::process::Command;
 use std::thread;
-use std::sync::mpsc;
+use std::sync::{mpsc,Arc,Mutex};
 //use std::option::Option;
 use std::time;
 
@@ -24,26 +24,58 @@ fn main() {
     let (out_req_tx, out_req_rx) = mpsc::channel();
     let (out_tx, out_rx) = mpsc::channel();
 
-    let mut photo_buffer = FIFOBuffer::<flickr::FlickrPhoto>{
+    let photo_buffer = Arc::new(Mutex::new(FIFOBuffer::<flickr::FlickrPhoto>{
         items: vec![],
         desired_buffering: 200,
-    };
+    }));
+    let y = photo_buffer.clone();
+    let z = photo_buffer.clone();
 
     thread::spawn(move || {
-        photo_buffer.run(in_req_tx, in_rx, out_req_rx, out_tx)
+        run_in(y, in_rx);
     });
-    thread::spawn(move || recharge);
+    thread::spawn(move || {
+        run_out(z, out_req_rx, out_tx, in_req_tx);
+    });
+    thread::spawn(move || {
+        recharge(in_req_rx, in_tx)
+    });
 
     loop {
         out_req_tx.send(1).unwrap();
         match out_rx.recv().unwrap() {
-            Some(_) => {
-                print!("{}", Blue.bold().paint("-"));
-                stdout().flush().unwrap();
+            Some(p) => {
+                //print!("[{}]", p.url_l.unwrap());
+                //stdout().flush().unwrap();
             },
             None => continue
         }
         thread::sleep(time::Duration::from_millis(300));
+    }
+}
+
+fn run_in(buf: Arc<Mutex<FIFOBuffer<flickr::FlickrPhoto>>>, chan_in: mpsc::Receiver<flickr::FlickrPhoto>) {
+    loop {
+        let item = chan_in.recv().unwrap();
+        buf.lock().unwrap().push(item);
+    }
+}
+
+fn run_out(buf: Arc<Mutex<FIFOBuffer<flickr::FlickrPhoto>>>, chan_out_req: mpsc::Receiver<usize>, chan_out: mpsc::Sender<Option<flickr::FlickrPhoto>>, chan_in_req: mpsc::Sender<usize>) {
+    loop {
+        match buf.lock().unwrap().topup() {
+            Some(n) => chan_in_req.send(n).unwrap(),
+            None => {}
+        }
+
+        let desired_outs = chan_out_req.recv().unwrap();
+        for _ in 0..desired_outs {
+            let mut option_item = None;
+            if !buf.lock().unwrap().items.is_empty() {
+                option_item = Some(buf.lock().unwrap().shift());
+            }
+            chan_out.send(option_item).unwrap();
+        }
     }
 }
 
@@ -53,59 +85,29 @@ struct FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
 }
 
 impl<T> FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
-    fn run(&self, chan_in_req: mpsc::Sender<usize>, chan_in: mpsc::Receiver<T>, chan_out_req: mpsc::Receiver<usize>, chan_out: mpsc::Sender<Option<T>>,) {
-        let a = thread::spawn(move || {self.run_in(chan_in)});
-        let b = thread::spawn(move || {self.run_out(chan_out_req, chan_out, chan_in_req)});
-        a.join();
-        b.join();
-    }
-
-    fn run_in(&self, chan_in: mpsc::Receiver<T>) {
-        loop {
-            let item = chan_in.recv().unwrap();
-            self.push(item);
-        }
-    }
-
-    fn run_out(&self, chan_out_req: mpsc::Receiver<usize>, chan_out: mpsc::Sender<Option<T>>, chan_in_req: mpsc::Sender<usize>) {
-        loop {
-            self.topup(chan_in_req);
-
-            let desired_outs = chan_out_req.recv().unwrap();
-            for i in 0..desired_outs {
-                let mut option_item = None;
-                if !self.items.is_empty() {
-                    option_item = Some(self.shift());
-                }
-                chan_out.send(option_item).unwrap();
-            }
-        }
-    }
-
-    fn shift(&self) -> T {
+    fn shift(&mut self) -> T {
         let item = self.items.remove(0);
         print!("{}", Blue.bold().paint("-"));
         stdout().flush().unwrap();
         item
     }
 
-    fn push(&self, item: T) {
+    fn push(&mut self, item: T) {
         self.items.push(item);
         print!("{}", Green.bold().paint("+"));
         stdout().flush().unwrap();
     }
 
-    fn topup(&self, chan_in_req: mpsc::Sender<usize>) -> bool {
+    fn topup(&mut self) -> Option<usize> {
         let items_len = self.items.len();
         if items_len < self.desired_buffering {
-            chan_in_req.send(self.desired_buffering - items_len).unwrap();
-            return true
+            return Some(self.desired_buffering - items_len)
         }
-        false
+        None
     }
 }
 
-fn recharge(minimum_items: u64, out_req: mpsc::Receiver<u32>, out: mpsc::Sender<flickr::FlickrPhoto>) {
+fn recharge(out_req: mpsc::Receiver<usize>, out: mpsc::Sender<flickr::FlickrPhoto>) {
     let mut pages_loaded = 0;
     loop {
         let wanted_n = out_req.recv().unwrap();
@@ -114,7 +116,7 @@ fn recharge(minimum_items: u64, out_req: mpsc::Receiver<u32>, out: mpsc::Sender<
         stdout().flush().unwrap();
 
         let mut photos_added = 0;
-        while photos_added < minimum_items {
+        while photos_added < wanted_n {
             print!("{}", Purple.bold().paint("?"));
             stdout().flush().unwrap();
 
