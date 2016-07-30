@@ -19,78 +19,24 @@ mod flickr;
 fn main() {
     println!("{}", Yellow.bold().paint("CatCache"));
 
-    let (tx_to_recharge, rx_to_recharge) = mpsc::channel();
-    let (tx_to_buffer, rx_to_buffer) = mpsc::channel();
-    let (tx_from_buffer, rx_from_buffer) = mpsc::channel();
+    let (in_req_tx, in_req_rx) = mpsc::channel();
+    let (in_tx, in_rx) = mpsc::channel();
+    let (out_req_tx, out_req_rx) = mpsc::channel();
+    let (out_tx, out_rx) = mpsc::channel();
 
-    let tx_to_buffer2 = tx_to_buffer.clone();
+    let mut photo_buffer = FIFOBuffer::<flickr::FlickrPhoto>{
+        items: vec![],
+        desired_buffering: 200,
+    };
 
     thread::spawn(move || {
-        let mut photos_with_url_l: Vec<flickr::FlickrPhoto> = vec![];
-
-        loop {
-            match rx_to_buffer.recv().unwrap() {
-                Some(p) => photos_with_url_l.push(p),
-                None => {
-                    if photos_with_url_l.is_empty() {
-                        //tx_recharge.send("RECHARGE").unwrap();
-                        tx_from_buffer.send(None).unwrap();
-                        tx_to_recharge.send(200).unwrap();
-                    } else {
-                        let photo = photos_with_url_l.remove(0);
-                        tx_from_buffer.send(Some(photo)).unwrap();
-                        if photos_with_url_l.len() < 200 {
-                            let wanted_n: u32 = 200 - (photos_with_url_l.len() as u32);
-                            //tx_to_recharge.send(wanted_n).unwrap();
-                            tx_to_recharge.send(wanted_n).unwrap();
-                        }
-                    }
-                }
-            }
-        }
+        photo_buffer.run(in_req_tx, in_rx, out_req_rx, out_tx)
     });
-    thread::spawn(move || {
-        let mut pages_loaded = 0;
-        loop {
-            let wanted_n = rx_to_recharge.recv().unwrap();
-            //let wanted_n: u32 = rx_to_recharge.recv().unwrap();
-            //print!("[{}]", Cyan.bold().paint(format!("({})", wanted_n)));
-            stdout().flush().unwrap();
-
-            let mut photos_added = 0;
-            while photos_added < wanted_n {
-                print!("{}", Purple.bold().paint("?"));
-                stdout().flush().unwrap();
-
-                let cat_page = get_cat_page(pages_loaded);
-                pages_loaded += 1;
-                print!("\n{}", Purple.bold().paint(format!("({})", pages_loaded)));
-                stdout().flush().unwrap();
-
-                for photo in cat_page.photo {
-                    if photo.url_l.is_some() {
-                        tx_to_buffer2.send(Some(photo)).unwrap();
-                        photos_added += 1;
-                        print!("{}", Green.bold().paint("+"));
-                    } else {
-                        print!("{}", Red.bold().paint("."));
-                    }
-                    stdout().flush().unwrap();
-                }
-            }
-
-            loop {
-                match rx_to_recharge.try_recv() {
-                    Ok(_) => {},
-                    Err(_) => break,
-                }
-            }
-        }
-    });
+    thread::spawn(move || recharge);
 
     loop {
-        tx_to_buffer.send(None).unwrap();
-        match rx_from_buffer.recv().unwrap() {
+        out_req_tx.send(1).unwrap();
+        match out_rx.recv().unwrap() {
             Some(_) => {
                 print!("{}", Blue.bold().paint("-"));
                 stdout().flush().unwrap();
@@ -99,39 +45,103 @@ fn main() {
         }
         thread::sleep(time::Duration::from_millis(300));
     }
-    /*
-    let mut photos_with_url_l: Vec<flickr::FlickrPhoto> = vec![];
+}
 
-    let mut pages_loaded = 0;
-    loop {
-        while !photos_with_url_l.is_empty() {
-            let photo = photos_with_url_l.remove(0);
-            //println!("pages_loaded={} {}", pages_loaded, photo.title);
-            //println!("  {}", photo.url_l.clone().unwrap());
-            print!("{}", Blue.bold().paint("-"));
-            stdout().flush().unwrap();
+struct FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
+    items: Vec<T>,
+    desired_buffering: usize,
+}
 
-            let output = Command::new("wget")
-                     .arg(photo.url_l.clone().unwrap())
-                     .output()
-                     .expect("failed to execute proces");
-        }
+impl<T> FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
+    fn run(&self, chan_in_req: mpsc::Sender<usize>, chan_in: mpsc::Receiver<T>, chan_out_req: mpsc::Receiver<usize>, chan_out: mpsc::Sender<Option<T>>,) {
+        let a = thread::spawn(move || {self.run_in(chan_in)});
+        let b = thread::spawn(move || {self.run_out(chan_out_req, chan_out, chan_in_req)});
+        a.join();
+        b.join();
+    }
 
-        let cat_page = get_cat_page(pages_loaded);
-        pages_loaded += 1;
-        print!("\n{}", Purple.bold().paint(format!("({})", pages_loaded)));
-        stdout().flush().unwrap();
-        for photo in cat_page.photo {
-            if photo.url_l.is_some() {
-                print!("{}", Green.bold().paint("+"));
-                photos_with_url_l.push(photo);
-            } else {
-                print!("{}", Red.bold().paint("."));
-            }
-            stdout().flush().unwrap();
+    fn run_in(&self, chan_in: mpsc::Receiver<T>) {
+        loop {
+            let item = chan_in.recv().unwrap();
+            self.push(item);
         }
     }
-    */
+
+    fn run_out(&self, chan_out_req: mpsc::Receiver<usize>, chan_out: mpsc::Sender<Option<T>>, chan_in_req: mpsc::Sender<usize>) {
+        loop {
+            self.topup(chan_in_req);
+
+            let desired_outs = chan_out_req.recv().unwrap();
+            for i in 0..desired_outs {
+                let mut option_item = None;
+                if !self.items.is_empty() {
+                    option_item = Some(self.shift());
+                }
+                chan_out.send(option_item).unwrap();
+            }
+        }
+    }
+
+    fn shift(&self) -> T {
+        let item = self.items.remove(0);
+        print!("{}", Blue.bold().paint("-"));
+        stdout().flush().unwrap();
+        item
+    }
+
+    fn push(&self, item: T) {
+        self.items.push(item);
+        print!("{}", Green.bold().paint("+"));
+        stdout().flush().unwrap();
+    }
+
+    fn topup(&self, chan_in_req: mpsc::Sender<usize>) -> bool {
+        let items_len = self.items.len();
+        if items_len < self.desired_buffering {
+            chan_in_req.send(self.desired_buffering - items_len).unwrap();
+            return true
+        }
+        false
+    }
+}
+
+fn recharge(minimum_items: u64, out_req: mpsc::Receiver<u32>, out: mpsc::Sender<flickr::FlickrPhoto>) {
+    let mut pages_loaded = 0;
+    loop {
+        let wanted_n = out_req.recv().unwrap();
+        //let wanted_n: u32 = rx_to_recharge.recv().unwrap();
+        //print!("[{}]", Cyan.bold().paint(format!("({})", wanted_n)));
+        stdout().flush().unwrap();
+
+        let mut photos_added = 0;
+        while photos_added < minimum_items {
+            print!("{}", Purple.bold().paint("?"));
+            stdout().flush().unwrap();
+
+            let cat_page = get_cat_page(pages_loaded);
+            pages_loaded += 1;
+            print!("\n{}", Purple.bold().paint(format!("({})", pages_loaded)));
+            stdout().flush().unwrap();
+
+            for photo in cat_page.photo {
+                if photo.url_l.is_some() {
+                    out.send(photo).unwrap();
+                    photos_added += 1;
+                    print!("{}", Green.bold().paint("+"));
+                } else {
+                    print!("{}", Red.bold().paint("."));
+                }
+                stdout().flush().unwrap();
+            }
+        }
+
+        loop {
+            match out_req.try_recv() {
+                Ok(_) => {},
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 fn get_cat_page(page: u32) -> flickr::FlickrPhotosPage {
