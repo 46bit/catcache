@@ -26,6 +26,40 @@ pub struct FlickrPhoto {
 }
 
 /*
+pub struct Buffer<T> {
+    pub items: Vec<T>,
+    pub
+}
+
+Buffer<FlickrPhoto>
+
+pub struct FIFOBuffer<T> {
+    pub photos: Vec<T>,
+    pub desired_buffering: u64
+}
+
+pub trait FIFOBufferRecharger {
+
+}
+*/
+
+/*
+* When #buffer < desired_buffering, load a new page and its url_l photos to buffer.
+* When an item is taken from the buffer,
+
+* One thread to handle data access:
+  * Provide a FlickrPhoto from the out of the FIFO buffer
+  * Insert a FlickrPhoto to the end of the FIFO buffer
+* One thread to handle requesting pages?
+  * Or one thread per requested page?
+* One webserver thread to serve images.
+
+* The buffer can be an abstract FIFOBuffer.
+* The data-from-flickr thread can be special purpose?
+  * Called with message min_items=N, where N is how short the buffer is of items?
+*/
+
+/*
 {
    "stat" : "ok",
    "photos" : {
