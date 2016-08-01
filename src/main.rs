@@ -2,6 +2,8 @@ extern crate ansi_term;
 extern crate rustc_serialize;
 extern crate hyper;
 extern crate regex;
+#[macro_use(chan_select)]
+extern crate chan;
 
 use ansi_term::Colour::*;
 use rustc_serialize::json;
@@ -10,90 +12,86 @@ use std::io::*;
 use regex::Regex;
 //use std::process::Command;
 use std::thread;
-use std::sync::{mpsc,Arc,Mutex};
+use std::sync::{Arc,Mutex};
 //use std::option::Option;
 use std::time;
+use std::collections::VecDeque;
 
 mod flickr;
 
 fn main() {
     println!("{}", Yellow.bold().paint("CatCache"));
 
-    let (in_req_tx, in_req_rx) = mpsc::channel();
-    let (in_tx, in_rx) = mpsc::channel();
-    let (out_req_tx, out_req_rx) = mpsc::channel();
-    let (out_tx, out_rx) = mpsc::channel();
+    let (enqueue_tx, enqueue_rx) = chan::sync(10);
+    let (refill_tx, refill_rx) = chan::async();
+    let (dequeue_tx, dequeue_rx) = chan::sync(10);
+    let (request_dequeue_tx, request_dequeue_rx) = chan::sync(10);
 
     let photo_buffer = Arc::new(Mutex::new(FIFOBuffer::<flickr::FlickrPhoto>{
-        items: vec![],
+        items: VecDeque::with_capacity(200),
         desired_buffering: 200,
     }));
-    let y = photo_buffer.clone();
-    let z = photo_buffer.clone();
 
     thread::spawn(move || {
-        run_in(y, in_rx);
+        run(photo_buffer, enqueue_rx, request_dequeue_rx, dequeue_tx, refill_tx);
     });
     thread::spawn(move || {
-        run_out(z, out_req_rx, out_tx, in_req_tx);
-    });
-    thread::spawn(move || {
-        recharge(in_req_rx, in_tx)
+        recharge(refill_rx, enqueue_tx);
     });
 
     loop {
-        out_req_tx.send(1).unwrap();
-        match out_rx.recv().unwrap() {
-            Some(p) => {
+        request_dequeue_tx.send(1);
+        match dequeue_rx.recv().unwrap() {
+            Some(_) => {
                 //print!("[{}]", p.url_l.unwrap());
                 //stdout().flush().unwrap();
             },
             None => continue
         }
-        thread::sleep(time::Duration::from_millis(300));
+        thread::sleep(time::Duration::from_millis(100));
     }
 }
 
-fn run_in(buf: Arc<Mutex<FIFOBuffer<flickr::FlickrPhoto>>>, chan_in: mpsc::Receiver<flickr::FlickrPhoto>) {
-    loop {
-        let item = chan_in.recv().unwrap();
-        buf.lock().unwrap().push(item);
-    }
-}
-
-fn run_out(buf: Arc<Mutex<FIFOBuffer<flickr::FlickrPhoto>>>, chan_out_req: mpsc::Receiver<usize>, chan_out: mpsc::Sender<Option<flickr::FlickrPhoto>>, chan_in_req: mpsc::Sender<usize>) {
+fn run(buf: Arc<Mutex<FIFOBuffer<flickr::FlickrPhoto>>>, enqueue_rx: chan::Receiver<flickr::FlickrPhoto>, request_dequeue_rx: chan::Receiver<usize>, dequeue_tx: chan::Sender<Option<flickr::FlickrPhoto>>, refill_tx: chan::Sender<usize>) {
     loop {
         match buf.lock().unwrap().topup() {
-            Some(n) => chan_in_req.send(n).unwrap(),
+            Some(n) => refill_tx.send(n),
             None => {}
         }
 
-        let desired_outs = chan_out_req.recv().unwrap();
-        for _ in 0..desired_outs {
-            let mut option_item = None;
-            if !buf.lock().unwrap().items.is_empty() {
-                option_item = Some(buf.lock().unwrap().shift());
-            }
-            chan_out.send(option_item).unwrap();
+        chan_select! {
+            enqueue_rx.recv() -> item => {
+                let i = item.unwrap();
+                buf.lock().unwrap().push(i);
+            },
+            request_dequeue_rx.recv() -> desired_outs => {
+                for _ in 0..desired_outs.unwrap() {
+                    let mut option_item = None;
+                    if !buf.lock().unwrap().items.is_empty() {
+                        option_item = Some(buf.lock().unwrap().shift());
+                    }
+                    dequeue_tx.send(option_item);
+                }
+            },
         }
     }
 }
 
 struct FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
-    items: Vec<T>,
+    items: VecDeque<T>,
     desired_buffering: usize,
 }
 
 impl<T> FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
     fn shift(&mut self) -> T {
-        let item = self.items.remove(0);
+        let item = self.items.pop_front().unwrap();
         print!("{}", Blue.bold().paint("-"));
         stdout().flush().unwrap();
         item
     }
 
     fn push(&mut self, item: T) {
-        self.items.push(item);
+        self.items.push_back(item);
         print!("{}", Green.bold().paint("+"));
         stdout().flush().unwrap();
     }
@@ -107,13 +105,13 @@ impl<T> FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
     }
 }
 
-fn recharge(out_req: mpsc::Receiver<usize>, out: mpsc::Sender<flickr::FlickrPhoto>) {
+fn recharge(refill_rx: chan::Receiver<usize>, enqueue_tx: chan::Sender<flickr::FlickrPhoto>) {
     let mut pages_loaded = 0;
     loop {
-        let wanted_n = out_req.recv().unwrap();
+        let wanted_n = refill_rx.recv().unwrap();
         //let wanted_n: u32 = rx_to_recharge.recv().unwrap();
         //print!("[{}]", Cyan.bold().paint(format!("({})", wanted_n)));
-        stdout().flush().unwrap();
+        //stdout().flush().unwrap();
 
         let mut photos_added = 0;
         while photos_added < wanted_n {
@@ -127,7 +125,7 @@ fn recharge(out_req: mpsc::Receiver<usize>, out: mpsc::Sender<flickr::FlickrPhot
 
             for photo in cat_page.photo {
                 if photo.url_l.is_some() {
-                    out.send(photo).unwrap();
+                    enqueue_tx.send(photo);
                     photos_added += 1;
                     print!("{}", Green.bold().paint("+"));
                 } else {
@@ -138,9 +136,9 @@ fn recharge(out_req: mpsc::Receiver<usize>, out: mpsc::Sender<flickr::FlickrPhot
         }
 
         loop {
-            match out_req.try_recv() {
-                Ok(_) => {},
-                Err(_) => break,
+            chan_select! {
+                default => break,
+                refill_rx.recv() => continue,
             }
         }
     }
