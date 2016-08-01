@@ -4,11 +4,13 @@ extern crate hyper;
 extern crate regex;
 #[macro_use(chan_select)]
 extern crate chan;
+extern crate iron;
+extern crate router;
 
 use ansi_term::Colour::*;
 use rustc_serialize::json;
-use hyper::client::*;
-use std::io::*;
+use hyper::client;
+use std::io::{stdout, Read, Write};
 use regex::Regex;
 //use std::process::Command;
 use std::thread;
@@ -16,6 +18,8 @@ use std::sync::{Arc,Mutex};
 //use std::option::Option;
 use std::time;
 use std::collections::VecDeque;
+use iron::status;
+use router::Router;
 
 mod flickr;
 
@@ -39,7 +43,7 @@ fn main() {
         recharge(refill_rx, enqueue_tx);
     });
 
-    loop {
+    /*loop {
         request_dequeue_tx.send(1);
         match dequeue_rx.recv().unwrap() {
             Some(_) => {
@@ -49,7 +53,34 @@ fn main() {
             None => continue
         }
         thread::sleep(time::Duration::from_millis(100));
-    }
+    }*/
+
+    let mut router = Router::new();
+    router.get("/cat.jpg", move |_: &mut iron::prelude::Request| {
+        request_dequeue_tx.send(1);
+        match dequeue_rx.recv().unwrap() {
+            Some(cat_photo) => {
+                let cat_url_l = cat_photo.url_l.unwrap();
+
+                let client = hyper::Client::new();
+                let mut response = match client.get(&*cat_url_l).send() {
+                    Ok(response) => response,
+                    Err(_) => return Ok(iron::prelude::Response::with((status::Ok, "")))
+                };
+
+                let mut buf = Vec::new();
+                match response.read_to_end(&mut buf) {
+                    Ok(_) => (),
+                    Err(_) => return Ok(iron::prelude::Response::with((status::Ok, "")))
+                };
+
+                Ok(iron::prelude::Response::with((status::Ok, buf)))
+            },
+            None => return Ok(iron::prelude::Response::with((status::Ok, "")))
+        }
+    });
+
+    iron::Iron::new(router).http("localhost:3000").unwrap();
 }
 
 fn run(buf: Arc<Mutex<FIFOBuffer<flickr::FlickrPhoto>>>, enqueue_rx: chan::Receiver<flickr::FlickrPhoto>, request_dequeue_rx: chan::Receiver<usize>, dequeue_tx: chan::Sender<Option<flickr::FlickrPhoto>>, refill_tx: chan::Sender<usize>) {
@@ -79,34 +110,6 @@ fn run(buf: Arc<Mutex<FIFOBuffer<flickr::FlickrPhoto>>>, enqueue_rx: chan::Recei
                 }
             },
         }
-    }
-}
-
-struct FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
-    items: VecDeque<T>,
-    desired_buffering: usize,
-}
-
-impl<T> FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
-    fn shift(&mut self) -> T {
-        let item = self.items.pop_front().unwrap();
-        print!("{}", Blue.bold().paint("-"));
-        stdout().flush().unwrap();
-        item
-    }
-
-    fn push(&mut self, item: T) {
-        self.items.push_back(item);
-        print!("{}", Green.bold().paint("+"));
-        stdout().flush().unwrap();
-    }
-
-    fn topup(&mut self) -> Option<usize> {
-        let items_len = self.items.len();
-        if items_len < self.desired_buffering {
-            return Some(self.desired_buffering - items_len)
-        }
-        None
     }
 }
 
@@ -159,7 +162,7 @@ fn recharge(refill_rx: chan::Receiver<usize>, enqueue_tx: chan::Sender<flickr::F
 fn get_cat_page(page: u64) -> flickr::FlickrPhotosPage {
     let url: String = format!("https://api.flickr.com/services/rest/?api_key=6e8f097ad24b04e820faa21a96f9f6d7&method=flickr.photos.search&format=json&content_type=1&media=photos&extras=url_l&tags=cat&page={}&per_page=500", page);
 
-    let client = Client::new();
+    let client = hyper::Client::new();
     let mut response = match client.get(&*url).send() {
         Ok(response) => response,
         Err(_) => panic!("Whoops."),
@@ -182,4 +185,32 @@ fn get_cat_page(page: u64) -> flickr::FlickrPhotosPage {
     };
     let photos_page = photos_search_result.photos;
     return photos_page;
+}
+
+struct FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
+    items: VecDeque<T>,
+    desired_buffering: usize,
+}
+
+impl<T> FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
+    fn shift(&mut self) -> T {
+        let item = self.items.pop_front().unwrap();
+        print!("{}", Blue.bold().paint("-"));
+        stdout().flush().unwrap();
+        item
+    }
+
+    fn push(&mut self, item: T) {
+        self.items.push_back(item);
+        print!("{}", Green.bold().paint("+"));
+        stdout().flush().unwrap();
+    }
+
+    fn topup(&mut self) -> Option<usize> {
+        let items_len = self.items.len();
+        if items_len < self.desired_buffering {
+            return Some(self.desired_buffering - items_len)
+        }
+        None
+    }
 }
