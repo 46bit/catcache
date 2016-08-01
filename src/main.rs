@@ -53,12 +53,12 @@ fn main() {
 }
 
 fn run(buf: Arc<Mutex<FIFOBuffer<flickr::FlickrPhoto>>>, enqueue_rx: chan::Receiver<flickr::FlickrPhoto>, request_dequeue_rx: chan::Receiver<usize>, dequeue_tx: chan::Sender<Option<flickr::FlickrPhoto>>, refill_tx: chan::Sender<usize>) {
-    loop {
-        match buf.lock().unwrap().topup() {
-            Some(n) => refill_tx.send(n),
-            None => {}
-        }
+    match buf.lock().unwrap().topup() {
+        Some(n) => refill_tx.send(n),
+        None => {}
+    }
 
+    loop {
         chan_select! {
             enqueue_rx.recv() -> item => {
                 let i = item.unwrap();
@@ -71,6 +71,11 @@ fn run(buf: Arc<Mutex<FIFOBuffer<flickr::FlickrPhoto>>>, enqueue_rx: chan::Recei
                         option_item = Some(buf.lock().unwrap().shift());
                     }
                     dequeue_tx.send(option_item);
+                }
+
+                match buf.lock().unwrap().topup() {
+                    Some(n) => refill_tx.send(n),
+                    None => {}
                 }
             },
         }
@@ -107,6 +112,7 @@ impl<T> FIFOBuffer<T> where T: std::marker::Sync, T: std::marker::Send {
 
 fn recharge(refill_rx: chan::Receiver<usize>, enqueue_tx: chan::Sender<flickr::FlickrPhoto>) {
     let mut pages_loaded = 0;
+    let mut number_of_pages;
     loop {
         let wanted_n = refill_rx.recv().unwrap();
         //let wanted_n: u32 = rx_to_recharge.recv().unwrap();
@@ -119,8 +125,14 @@ fn recharge(refill_rx: chan::Receiver<usize>, enqueue_tx: chan::Sender<flickr::F
             stdout().flush().unwrap();
 
             let cat_page = get_cat_page(pages_loaded);
+            number_of_pages = cat_page.pages;
             pages_loaded += 1;
-            print!("\n{}", Purple.bold().paint(format!("({})", pages_loaded)));
+            if pages_loaded > number_of_pages {
+                pages_loaded = 0;
+                println!("{}", Purple.bold().paint("L"));
+            }
+
+            print!("\n{}", Purple.bold().paint(format!("({}/{})", pages_loaded, number_of_pages)));
             stdout().flush().unwrap();
 
             for photo in cat_page.photo {
@@ -144,8 +156,8 @@ fn recharge(refill_rx: chan::Receiver<usize>, enqueue_tx: chan::Sender<flickr::F
     }
 }
 
-fn get_cat_page(page: u32) -> flickr::FlickrPhotosPage {
-    let url: String = format!("https://api.flickr.com/services/rest/?api_key=6e8f097ad24b04e820faa21a96f9f6d7&method=flickr.photos.search&format=json&content_type=1&media=photos&extras=url_l&tags=cats&page={}&per_page=500", page);
+fn get_cat_page(page: u64) -> flickr::FlickrPhotosPage {
+    let url: String = format!("https://api.flickr.com/services/rest/?api_key=6e8f097ad24b04e820faa21a96f9f6d7&method=flickr.photos.search&format=json&content_type=1&media=photos&extras=url_l&tags=cat&page={}&per_page=500", page);
 
     let client = Client::new();
     let mut response = match client.get(&*url).send() {
