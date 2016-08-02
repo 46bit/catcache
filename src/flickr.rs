@@ -1,7 +1,3 @@
-extern crate rustc_serialize;
-
-use std::option::Option;
-
 #[derive(RustcDecodable, RustcEncodable)]
 pub struct FlickrPhotosSearchResult {
     pub stat: String,
@@ -24,24 +20,6 @@ pub struct FlickrPhoto {
     pub title: String,
     pub url_l: Option<String>,
 }
-
-/*
-pub struct Buffer<T> {
-    pub items: Vec<T>,
-    pub
-}
-
-Buffer<FlickrPhoto>
-
-pub struct FIFOBuffer<T> {
-    pub photos: Vec<T>,
-    pub desired_buffering: u64
-}
-
-pub trait FIFOBufferRecharger {
-
-}
-*/
 
 /*
 * When #buffer < desired_buffering, load a new page and its url_l photos to buffer.
