@@ -13,7 +13,7 @@ use ansi_term::Colour::*;
 use std::io::{stdout, Read, Write};
 use regex::Regex;
 use std::thread;
-use std::sync::{Arc,Mutex};
+use std::sync::{Arc, Mutex};
 use iron::status;
 use iron::prelude::*;
 use router::Router;
@@ -33,7 +33,11 @@ fn main() {
 
     let photo_buffer = Arc::new(Mutex::new(FIFOBuffer::new(200)));
     thread::spawn(move || {
-        run(photo_buffer, enqueue_rx, request_dequeue_rx, dequeue_tx, refill_tx);
+        run(photo_buffer,
+            enqueue_rx,
+            request_dequeue_rx,
+            dequeue_tx,
+            refill_tx);
     });
     thread::spawn(move || {
         recharge(refill_rx, enqueue_tx);
@@ -49,25 +53,33 @@ fn main() {
                 let client = hyper::Client::new();
                 let mut response = match client.get(cat_url_l.as_str()).send() {
                     Ok(response) => response,
-                    Err(_) => return Ok(Response::with((status::Ok, "")))
+                    Err(_) => return Ok(Response::with((status::Ok, ""))),
                 };
 
                 let mut buf = Vec::new();
                 match response.read_to_end(&mut buf) {
                     Ok(_) => (),
-                    Err(_) => return Ok(Response::with((status::Ok, "")))
+                    Err(_) => return Ok(Response::with((status::Ok, ""))),
                 };
 
                 Ok(Response::with((status::Ok, buf)))
-            },
-            None => return Ok(Response::with((status::Ok, "")))
+            }
+            None => return Ok(Response::with((status::Ok, ""))),
         }
     });
 
     Iron::new(router).http("localhost:3000").unwrap();
 }
 
-fn run<T>(buf: Arc<Mutex<FIFOBuffer<T>>>, enqueue_rx: Receiver<T>, request_dequeue_rx: Receiver<usize>, dequeue_tx: Sender<Option<T>>, refill_tx: Sender<usize>) where T: Sync, T: Send, T: 'static {
+fn run<T>(buf: Arc<Mutex<FIFOBuffer<T>>>,
+          enqueue_rx: Receiver<T>,
+          request_dequeue_rx: Receiver<usize>,
+          dequeue_tx: Sender<Option<T>>,
+          refill_tx: Sender<usize>)
+    where T: Sync,
+          T: Send,
+          T: 'static
+{
     match buf.lock().unwrap().topup() {
         Some(n) => refill_tx.send(n),
         None => {}
@@ -112,7 +124,8 @@ fn recharge(refill_rx: Receiver<usize>, enqueue_tx: Sender<FlickrPhoto>) {
             number_of_pages = cat_page.pages;
             pages_loaded += 1;
 
-            print!("\n{}", Purple.bold().paint(format!("({}/{})", pages_loaded, number_of_pages)));
+            print!("\n{}",
+                   Purple.bold().paint(format!("({}/{})", pages_loaded, number_of_pages)));
             stdout().flush().unwrap();
 
             for photo in cat_page.photo {
@@ -142,7 +155,10 @@ fn recharge(refill_rx: Receiver<usize>, enqueue_tx: Sender<FlickrPhoto>) {
 }
 
 fn get_cat_page(page: u64) -> FlickrPhotosPage {
-    let url: String = format!("https://api.flickr.com/services/rest/?api_key=6e8f097ad24b04e820faa21a96f9f6d7&method=flickr.photos.search&format=json&content_type=1&media=photos&extras=url_l&tags=cat&page={}&per_page=500", page);
+    let url: String = format!("https://api.flickr.\
+                               com/services/rest/?api_key=6e8f097ad24b04e820faa21a96f9f6d7&method=flickr.\
+                               photos.search&format=json&content_type=1&media=photos&extras=url_l&tags=cat&page={}&per_page=500",
+                              page);
 
     let client = hyper::Client::new();
     let mut response = match client.get(url.as_str()).send() {
