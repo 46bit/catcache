@@ -1,5 +1,6 @@
 extern crate ansi_term;
 extern crate hyper;
+extern crate hyper_native_tls;
 extern crate regex;
 #[macro_use(chan_select)]
 extern crate chan;
@@ -19,6 +20,10 @@ use iron::prelude::*;
 use router::Router;
 use std::option::Option;
 use chan::{Receiver, Sender};
+use hyper_native_tls::NativeTlsClient;
+use hyper::net::HttpsConnector;
+use iron::modifiers::Redirect;
+use iron::Url;
 
 use catcache::flickr::*;
 use catcache::fifobuffer::*;
@@ -33,40 +38,28 @@ fn main() {
 
     let photo_buffer = Arc::new(Mutex::new(FIFOBuffer::new(200)));
     thread::spawn(move || {
-        run(photo_buffer,
-            enqueue_rx,
-            request_dequeue_rx,
-            dequeue_tx,
-            refill_tx);
-    });
-    thread::spawn(move || {
-        recharge(refill_rx, enqueue_tx);
-    });
+                      run(photo_buffer,
+                          enqueue_rx,
+                          request_dequeue_rx,
+                          dequeue_tx,
+                          refill_tx);
+                  });
+    thread::spawn(move || { recharge(refill_rx, enqueue_tx); });
 
     let mut router = Router::new();
-    router.get("/cat.jpg", move |_: &mut Request| {
+    router.get("/cat.jpg",
+               move |_: &mut Request| {
         request_dequeue_tx.send(1);
         match dequeue_rx.recv().unwrap() {
             Some(cat_photo) => {
                 let cat_url_l = cat_photo.url_l.unwrap();
-
-                let client = hyper::Client::new();
-                let mut response = match client.get(cat_url_l.as_str()).send() {
-                    Ok(response) => response,
-                    Err(_) => return Ok(Response::with((status::Ok, ""))),
-                };
-
-                let mut buf = Vec::new();
-                match response.read_to_end(&mut buf) {
-                    Ok(_) => (),
-                    Err(_) => return Ok(Response::with((status::Ok, ""))),
-                };
-
-                Ok(Response::with((status::Ok, buf)))
+                let url = Url::parse(&cat_url_l).unwrap();
+                Ok(Response::with((status::TemporaryRedirect, Redirect(url))))
             }
-            None => return Ok(Response::with((status::Ok, ""))),
+            None => return Ok(Response::with((status::InternalServerError, ""))),
         }
-    });
+    },
+               "cat");
 
     Iron::new(router).http("localhost:3000").unwrap();
 }
@@ -125,7 +118,9 @@ fn recharge(refill_rx: Receiver<usize>, enqueue_tx: Sender<FlickrPhoto>) {
             pages_loaded += 1;
 
             print!("\n{}",
-                   Purple.bold().paint(format!("({}/{})", pages_loaded, number_of_pages)));
+                   Purple
+                       .bold()
+                       .paint(format!("({}/{})", pages_loaded, number_of_pages)));
             stdout().flush().unwrap();
 
             for photo in cat_page.photo {
@@ -159,11 +154,15 @@ fn get_cat_page(page: u64) -> FlickrPhotosPage {
                                com/services/rest/?api_key=6e8f097ad24b04e820faa21a96f9f6d7&method=flickr.\
                                photos.search&format=json&content_type=1&media=photos&extras=url_l&tags=cat&page={}&per_page=500",
                               page);
+    let ssl = NativeTlsClient::new().unwrap();
+    let connector = HttpsConnector::new(ssl);
+    let client = hyper::Client::with_connector(connector);
 
-    let client = hyper::Client::new();
     let mut response = match client.get(url.as_str()).send() {
         Ok(response) => response,
-        Err(_) => panic!("Whoops."),
+        Err(_) => {
+            panic!("Whoops.");
+        }
     };
 
     let mut buf = String::new();
@@ -175,7 +174,7 @@ fn get_cat_page(page: u64) -> FlickrPhotosPage {
     let re = Regex::new(r"^jsonFlickrApi\(").unwrap();
     let re2 = Regex::new(r"\)$").unwrap();
     let buf2 = re.replace_all(buf.as_str(), "");
-    let buf3: String = re2.replace_all(buf2.as_str(), "");
+    let buf3: String = re2.replace_all(&buf2.into_owned(), "").into_owned();
 
     let photos_search_result: FlickrPhotosSearchResult = match json::decode(buf3.as_str()) {
         Ok(a) => a,
